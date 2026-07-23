@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import StatusCard from "@/components/StatusCard";
 import { useRouter } from "next/navigation";
 
@@ -19,10 +19,6 @@ interface Incident {
   startedAt: string;
 }
 
-const AUTO_REFRESH_SECONDS = 10;
-const FAST_POLL_MS = 2000;
-const NORMAL_POLL_MS = AUTO_REFRESH_SECONDS * 1000;
-
 export default function DashboardPage() {
   const router = useRouter();
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
@@ -30,13 +26,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [checking, setChecking] = useState(false);
-  const [checkingServices, setCheckingServices] = useState<string[]>([]);
-  const [fetchError, setFetchError] = useState(false);
-  const [countdown, setCountdown] = useState(AUTO_REFRESH_SECONDS);
-
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextRefreshAt = useRef<number>(Date.now() + NORMAL_POLL_MS);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -46,74 +35,29 @@ export default function DashboardPage() {
         setStatuses(data.statuses || []);
         setOpenIncidents(data.openIncidents || []);
         setLastRefresh(new Date());
-        setFetchError(false);
-
-        const serverChecking: boolean = data.isChecking ?? false;
-        const serverCheckingServices: string[] = data.checkingServices ?? [];
-        setCheckingServices(serverCheckingServices);
-
-        if (serverChecking !== checking) {
-          setChecking(serverChecking);
-        }
-      } else {
-        setFetchError(true);
       }
-    } catch {
-      setFetchError(true);
     } finally {
       setLoading(false);
     }
-  }, [checking]);
-
-  const schedulePolling = useCallback((fast: boolean) => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    const ms = fast ? FAST_POLL_MS : NORMAL_POLL_MS;
-    nextRefreshAt.current = Date.now() + ms;
-    intervalRef.current = setInterval(async () => {
-      await fetchStatus();
-      nextRefreshAt.current = Date.now() + ms;
-    }, ms);
-  }, [fetchStatus]);
-
-  useEffect(() => {
-    fetchStatus();
-    schedulePolling(false);
-
-    countdownRef.current = setInterval(() => {
-      const remaining = Math.max(0, Math.round((nextRefreshAt.current - Date.now()) / 1000));
-      setCountdown(remaining);
-    }, 500);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (countdownRef.current) clearInterval(countdownRef.current);
-    };
   }, []);
 
   useEffect(() => {
-    schedulePolling(checking);
-  }, [checking]);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 30000);
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
 
   async function runCheck() {
     setChecking(true);
-    setCheckingServices(statuses.map(s => s.service));
     await fetch("/api/health-check", { method: "POST" });
     await fetchStatus();
+    setChecking(false);
   }
 
   const anyDown = openIncidents.length > 0;
 
   return (
     <div className="p-4 space-y-4 max-w-2xl mx-auto">
-      {fetchError && (
-        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-2xl px-4 py-3 flex items-center gap-3">
-          <span className="text-yellow-400 text-lg">⚠️</span>
-          <p className="text-yellow-300 text-sm font-medium">
-            Could not reach Watchdog — showing last known data, retrying…
-          </p>
-        </div>
-      )}
-
       {anyDown && (
         <div className="bg-red-900/40 border border-red-700/60 rounded-2xl px-4 py-3 flex items-center gap-3 pulse-red">
           <span className="text-red-400 text-xl">🚨</span>
@@ -140,14 +84,8 @@ export default function DashboardPage() {
           onClick={runCheck}
           disabled={checking}
           className="text-xs text-teal-400 hover:text-teal-300 disabled:opacity-50 flex items-center gap-1.5"
-          data-testid="button-check-now"
         >
-          {checking ? (
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block w-3 h-3 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
-              Checking…
-            </span>
-          ) : "🔄 Check now"}
+          {checking ? "⏳ Checking…" : "🔄 Check now"}
         </button>
       </div>
 
@@ -178,7 +116,6 @@ export default function DashboardPage() {
               responseTime={s.responseTime}
               checkedAt={s.checkedAt}
               uptime={s.uptime}
-              isChecking={checkingServices.includes(s.service)}
               incident={openIncidents.find(i => i.service === s.service)}
               onDiagnose={(incidentId) => router.push(`/chat?incident=${incidentId}`)}
             />
@@ -187,22 +124,9 @@ export default function DashboardPage() {
       )}
 
       {lastRefresh && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>Last updated: {lastRefresh.toLocaleTimeString()}</span>
-            <span>{checking ? "Checking now…" : `Next check in ${countdown}s`}</span>
-          </div>
-          <div className="h-0.5 w-full rounded-full bg-slate-800 overflow-hidden">
-            <div
-              className="h-full rounded-full bg-teal-600/60 transition-all duration-500"
-              style={{
-                width: checking
-                  ? "100%"
-                  : `${Math.max(0, (1 - countdown / AUTO_REFRESH_SECONDS) * 100)}%`
-              }}
-            />
-          </div>
-        </div>
+        <p className="text-center text-xs text-slate-600">
+          Auto-refreshes every 30s · Last: {lastRefresh.toLocaleTimeString()}
+        </p>
       )}
     </div>
   );
