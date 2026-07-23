@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: watchdog
+      POSTGRES_USER: watchdog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchdog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  watchdog:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://watchdog:${POSTGRES_PASSWORD}@postgres:5432/watchdog
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      WATCHDOG_ADMIN_USERNAME: ${WATCHDOG_ADMIN_USERNAME}
+      WATCHDOG_ADMIN_PASSWORD: ${WATCHDOG_ADMIN_PASSWORD}
+
+      HUB_URL: ${HUB_URL}
+      BUILDER_URL: ${BUILDER_URL}
+      DEPLOY_URL: ${DEPLOY_URL}
+
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_ORG: ${GITHUB_ORG}
+      HUB_REPO: ${HUB_REPO:-kantage-hub}
+      BUILDER_REPO: ${BUILDER_REPO:-kantage-builder}
+      DEPLOY_REPO: ${DEPLOY_REPO:-kantage-deploy}
+
+      HUB_SERVER_HOST: ${HUB_SERVER_HOST}
+      BUILDER_SERVER_HOST: ${BUILDER_SERVER_HOST}
+      DEPLOY_SERVER_HOST: ${DEPLOY_SERVER_HOST}
+      SSH_USERNAME: ${SSH_USERNAME:-root}
+      WATCHDOG_SSH_KEY: ${WATCHDOG_SSH_KEY}
+
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      ALERT_EMAIL: ${ALERT_EMAIL}
+      WATCHDOG_URL: ${WATCHDOG_URL}
+
+      CRON_SECRET: ${CRON_SECRET}
+      AUTO_REPAIR: ${AUTO_REPAIR:-true}
+
+  # Runs health checks every 60 seconds via cron
+  cron:
+    image: alpine:3.19
+    restart: unless-stopped
+    depends_on:
+      - watchdog
+    environment:
+      CRON_SECRET: ${CRON_SECRET}
+      WATCHDOG_INTERNAL_URL: http://watchdog:3001
+    command: >
+      sh -c "
+        echo '* * * * * wget -q -O- --header=\"x-cron-secret: \$CRON_SECRET\" --post-data=\"\" \$WATCHDOG_INTERNAL_URL/api/health-check > /dev/null 2>&1' | crontab - &&
+        crond -f -l 2
+      "
+
+volumes:
+  pgdata:
