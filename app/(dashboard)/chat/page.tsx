@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import DiffCard, { PendingApproval } from "@/components/DiffCard";
+import DiffCard from "@/components/DiffCard";
 
 interface FileChange {
   path: string;
@@ -11,14 +11,6 @@ interface FileChange {
   summary: string;
 }
 
-interface TrailEvent {
-  type: "tool_call" | "tool_result";
-  name: string;
-  input?: Record<string, unknown>;
-  output?: string;
-  error?: boolean;
-}
-
 interface Message {
   id: string;
   role: "user" | "assistant";
@@ -26,75 +18,18 @@ interface Message {
   hasCode: boolean;
   createdAt: string;
   changeId?: string;
-  trail?: TrailEvent[];
-  streaming?: boolean;
 }
 
 interface ChangeState {
   changeId: string;
   changes: FileChange[];
-  approvals: PendingApproval[];
   status: "pending" | "approved" | "dismissed" | "failed";
-  prUrl?: string;
 }
 
 interface Session {
   id: string;
   title: string;
   updatedAt: string;
-}
-
-const TOOL_LABELS: Record<string, string> = {
-  read_file: "Reading file",
-  list_files: "Listing files",
-  get_docker_logs: "Getting Docker logs",
-  run_ssh_command: "Running SSH command",
-  restart_container: "Queuing restart",
-  propose_code_changes: "Preparing code changes",
-};
-
-function TrailItem({ event }: { event: TrailEvent }) {
-  const [expanded, setExpanded] = useState(false);
-  const isCall = event.type === "tool_call";
-  const label = TOOL_LABELS[event.name] || event.name;
-
-  const detail = isCall
-    ? Object.entries(event.input || {}).map(([k, v]) => `${k}: ${String(v)}`).join(" · ")
-    : event.output || "";
-
-  return (
-    <div className={`flex items-start gap-2 text-xs py-1 ${isCall ? "text-slate-400" : event.error ? "text-red-400" : "text-slate-500"}`}>
-      <span className="mt-0.5 flex-shrink-0">
-        {isCall ? "⚙" : event.error ? "✗" : "✓"}
-      </span>
-      <div className="min-w-0">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="text-left hover:text-slate-300 transition-colors"
-        >
-          <span className="font-medium">{label}</span>
-          {detail && <span className="ml-1 opacity-60 truncate">{detail.slice(0, 60)}{detail.length > 60 ? "…" : ""}</span>}
-        </button>
-        {expanded && detail && (
-          <pre className="mt-1 text-[10px] bg-[#161922] rounded p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
-            {detail}
-          </pre>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TrailPanel({ events }: { events: TrailEvent[] }) {
-  if (events.length === 0) return null;
-  return (
-    <div className="mt-2 rounded-xl bg-[#161922] border border-[#2e3450] px-3 py-2">
-      <p className="text-[10px] uppercase tracking-wide text-slate-600 font-semibold mb-1.5">Investigation trail</p>
-      <div className="divide-y divide-[#2e3450]/50">
-        {events.map((e, i) => <TrailItem key={i} event={e} />)}
-      </div>
-    </div>
-  );
 }
 
 function ChatUI() {
@@ -112,8 +47,6 @@ function ChatUI() {
   const [sending, setSending] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [approving, setApproving] = useState<string | null>(null);
-  const [runningAction, setRunningAction] = useState<string | null>(null);
-  const [deletingSession, setDeletingSession] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const autoSentRef = useRef(false);
@@ -131,11 +64,7 @@ function ChatUI() {
 
     const cmap: Record<string, ChangeState> = {};
     for (const ch of data.codeChanges || []) {
-      const payload = ch.files as { changes?: any[]; approvals?: any[] } | null;
-      const changes = Array.isArray(payload) ? payload : (payload?.changes || []);
-      const approvals = payload?.approvals || [];
-      const prUrl = ch.prUrl || undefined;
-      cmap[ch.id] = { changeId: ch.id, changes, approvals, status: ch.status, prUrl };
+      cmap[ch.id] = { changeId: ch.id, changes: ch.files || [], status: ch.status };
     }
     setChangeMap(cmap);
 
@@ -171,11 +100,9 @@ function ChatUI() {
     const placeholder: Message = {
       id: placeholderId,
       role: "assistant",
-      content: "",
+      content: "Thinking…",
       hasCode: false,
       createdAt: new Date().toISOString(),
-      trail: [],
-      streaming: true,
     };
     setMessages(prev => [...prev, userMsg, placeholder]);
 
@@ -185,114 +112,39 @@ function ChatUI() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, sessionId: sid, incidentId }),
       });
+      const data = await res.json();
 
-      if (!res.ok || !res.body) {
-        const errData = await res.json().catch(() => ({}));
-        setMessages(prev => prev.map(m => m.id === placeholderId
-          ? { ...m, content: `Error: ${errData.error || "Could not reach the agent"}`, streaming: false }
-          : m
-        ));
-        return null;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
       let newSid = sid;
-      let finalReply = "";
-      let finalChanges: FileChange[] = [];
-      let finalApprovals: PendingApproval[] = [];
-      let metaReceived = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-
-        for (const part of parts) {
-          if (!part.startsWith("data: ")) continue;
-          const raw = part.slice(6).trim();
-          if (!raw) continue;
-
-          let event: any;
-          try { event = JSON.parse(raw); } catch { continue; }
-
-          if (event.type === "token") {
-            finalReply += event.text;
-            setMessages(prev => prev.map(m => m.id === placeholderId
-              ? { ...m, content: finalReply }
-              : m
-            ));
-          } else if (event.type === "tool_call" || event.type === "tool_result") {
-            const trailEvent: TrailEvent = event.type === "tool_call"
-              ? { type: "tool_call", name: event.name, input: event.input || {} }
-              : { type: "tool_result", name: event.name, output: event.output || "", error: event.error };
-            setMessages(prev => prev.map(m => m.id === placeholderId
-              ? { ...m, trail: [...(m.trail || []), trailEvent] }
-              : m
-            ));
-          } else if (event.type === "done") {
-            finalChanges = event.changes || [];
-            finalApprovals = event.approvals || [];
-          } else if (event.type === "meta") {
-            metaReceived = true;
-            if (!sid && event.sessionId) {
-              newSid = event.sessionId;
-              setSessionId(event.sessionId);
-              setSessionTitle(text.slice(0, 60));
-              router.replace(`/chat?session=${event.sessionId}`, { scroll: false });
-              loadSessions();
-            }
-
-            const hasCode = finalChanges.length > 0;
-            const hasApprovals = finalApprovals.length > 0;
-
-            setMessages(prev => prev.map(m => m.id === placeholderId
-              ? {
-                  ...m,
-                  id: event.messageId || placeholderId,
-                  content: finalReply || "(Investigation complete — see trail above)",
-                  hasCode: hasCode || hasApprovals,
-                  changeId: event.codeChangeId || undefined,
-                  streaming: false,
-                }
-              : m
-            ));
-
-            if (event.codeChangeId && (hasCode || hasApprovals)) {
-              setChangeMap(prev => ({
-                ...prev,
-                [event.codeChangeId]: {
-                  changeId: event.codeChangeId,
-                  changes: finalChanges,
-                  approvals: finalApprovals,
-                  status: "pending",
-                },
-              }));
-            }
-          } else if (event.type === "error") {
-            setMessages(prev => prev.map(m => m.id === placeholderId
-              ? { ...m, content: `Error: ${event.message}`, streaming: false }
-              : m
-            ));
-          }
-        }
+      if (!sid && data.sessionId) {
+        newSid = data.sessionId;
+        setSessionId(data.sessionId);
+        setSessionTitle(text.slice(0, 60));
+        router.replace(`/chat?session=${data.sessionId}`, { scroll: false });
+        loadSessions();
       }
 
-      if (!metaReceived) {
-        setMessages(prev => prev.map(m => m.id === placeholderId
-          ? { ...m, content: finalReply || "Done.", streaming: false }
-          : m
-        ));
+      setMessages(prev => prev.map(m => {
+        if (m.id !== placeholderId) return m;
+        return {
+          ...m,
+          id: data.messageId || placeholderId,
+          content: data.reply || "Error: empty response",
+          hasCode: (data.changes?.length || 0) > 0,
+          changeId: data.codeChangeId || undefined,
+        };
+      }));
+
+      if (data.codeChangeId && data.changes?.length > 0) {
+        setChangeMap(prev => ({
+          ...prev,
+          [data.codeChangeId]: { changeId: data.codeChangeId, changes: data.changes, status: "pending" },
+        }));
       }
 
       return newSid;
-    } catch (e: any) {
+    } catch {
       setMessages(prev => prev.map(m => m.id === placeholderId
-        ? { ...m, content: "Error: could not reach the server. Try again.", streaming: false }
+        ? { ...m, content: "Error: could not reach the server. Try again." }
         : m
       ));
       return null;
@@ -332,18 +184,15 @@ function ChatUI() {
       body: JSON.stringify({ changeId }),
     });
     const data = await res.json();
-    const prUrl = data.prUrl;
     setChangeMap(prev => ({
       ...prev,
-      [changeId]: { ...prev[changeId], status: res.ok ? "approved" : "failed", prUrl },
+      [changeId]: { ...prev[changeId], status: res.ok ? "approved" : "failed" },
     }));
     if (res.ok) {
       const sysMsg: Message = {
         id: "sys-" + Date.now(),
         role: "assistant",
-        content: prUrl
-          ? `✅ PR opened on GitHub. Review and merge to apply the fix.\n\n🔗 ${prUrl}`
-          : `✅ Changes committed. ${data.message || ""}`,
+        content: `✅ Changes pushed to GitHub. Commit: \`${data.commitSha?.slice(0, 7) || "done"}\`. ${data.message || ""}`,
         hasCode: false,
         createdAt: new Date().toISOString(),
       };
@@ -352,7 +201,7 @@ function ChatUI() {
       const errMsg: Message = {
         id: "err-" + Date.now(),
         role: "assistant",
-        content: `❌ Failed to create PR: ${data.error || "Unknown error"}`,
+        content: `❌ Push failed: ${data.error || "Unknown error"}`,
         hasCode: false,
         createdAt: new Date().toISOString(),
       };
@@ -368,70 +217,6 @@ function ChatUI() {
       body: JSON.stringify({ changeId }),
     });
     setChangeMap(prev => ({ ...prev, [changeId]: { ...prev[changeId], status: "dismissed" } }));
-  }
-
-  async function runAction(approval: PendingApproval, changeId: string) {
-    setRunningAction(approval.id);
-    try {
-      const res = await fetch("/api/approve-action", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changeId, approvalId: approval.id }),
-      });
-      const data = await res.json();
-      const resultMsg: Message = {
-        id: "action-" + Date.now(),
-        role: "assistant",
-        content: res.ok
-          ? (data.resultSummary || `✅ Action completed: ${approval.label}\n\nOutput:\n\`\`\`\n${data.output || "(no output)"}\n\`\`\``)
-          : `❌ Action failed (${res.status}): ${data.error || "Unknown error"}`,
-        hasCode: false,
-        createdAt: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, resultMsg]);
-      if (res.ok) {
-        // Mark approval consumed locally so the button disables immediately
-        setChangeMap(prev => {
-          const ch = prev[changeId];
-          if (!ch) return prev;
-          const updatedApprovals = (ch.approvals || []).map(a =>
-            a.id === approval.id ? { ...a, executedAt: new Date().toISOString() } : a
-          );
-          return { ...prev, [changeId]: { ...ch, approvals: updatedApprovals } };
-        });
-      }
-    } catch {
-      const errMsg: Message = {
-        id: "action-err-" + Date.now(),
-        role: "assistant",
-        content: `❌ Could not execute action: ${approval.label}`,
-        hasCode: false,
-        createdAt: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, errMsg]);
-    } finally {
-      setRunningAction(null);
-    }
-  }
-
-  async function deleteSession(id: string, e: React.MouseEvent) {
-    e.stopPropagation();
-    if (!confirm("Delete this conversation?")) return;
-    setDeletingSession(id);
-    try {
-      await fetch(`/api/sessions?id=${id}`, { method: "DELETE" });
-      setSessions(prev => prev.filter(s => s.id !== id));
-      if (id === sessionId) {
-        setSessionId(null);
-        setMessages([]);
-        setChangeMap({});
-        setSessionTitle("");
-        autoSentRef.current = false;
-        router.replace("/chat");
-      }
-    } finally {
-      setDeletingSession(null);
-    }
   }
 
   function startNew() {
@@ -460,37 +245,16 @@ function ChatUI() {
               + New Chat
             </button>
             {sessions.map(s => (
-              <div
+              <button
                 key={s.id}
-                className={`group relative flex items-center rounded-lg mb-1 transition-colors ${
-                  s.id === sessionId ? "bg-teal-900/40 border border-teal-700/40" : "hover:bg-[#21253a]"
+                onClick={() => { setSessionId(s.id); loadSession(s.id); router.replace(`/chat?session=${s.id}`, { scroll: false }); setShowSidebar(false); }}
+                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm mb-1 transition-colors ${
+                  s.id === sessionId ? "bg-teal-900/40 text-teal-200 border border-teal-700/40" : "text-slate-300 hover:bg-[#21253a]"
                 }`}
               >
-                <button
-                  onClick={() => { setSessionId(s.id); loadSession(s.id); router.replace(`/chat?session=${s.id}`, { scroll: false }); setShowSidebar(false); }}
-                  className="flex-1 text-left px-3 py-2.5 text-sm min-w-0"
-                >
-                  <p className={`line-clamp-1 ${s.id === sessionId ? "text-teal-200" : "text-slate-300"}`}>{s.title}</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{new Date(s.updatedAt).toLocaleDateString()}</p>
-                </button>
-                <button
-                  onClick={(e) => deleteSession(s.id, e)}
-                  disabled={deletingSession === s.id}
-                  title="Delete conversation"
-                  className="opacity-0 group-hover:opacity-100 flex-shrink-0 mr-2 p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-900/20 transition-all disabled:opacity-30"
-                >
-                  {deletingSession === s.id ? (
-                    <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                  ) : (
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  )}
-                </button>
-              </div>
+                <p className="line-clamp-1">{s.title}</p>
+                <p className="text-xs text-slate-500 mt-0.5">{new Date(s.updatedAt).toLocaleDateString()}</p>
+              </button>
             ))}
           </div>
           <div className="flex-1 bg-black/40" />
@@ -515,17 +279,17 @@ function ChatUI() {
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {messages.length === 0 && !sending && (
           <div className="text-center pt-8">
-            <p className="text-4xl mb-3">🛡️</p>
+            <p className="text-4xl mb-3">🤖</p>
             <p className="text-slate-300 font-medium">Watchdog AI Agent</p>
             <p className="text-slate-500 text-sm mt-1 max-w-xs mx-auto">
-              I investigate live server issues using Docker logs, SSH, and your codebase. Describe a problem to get started.
+              Describe a problem or ask me to fix something across Hub, Builder, or Deploy.
             </p>
             <div className="mt-6 space-y-2 text-left max-w-sm mx-auto">
               {[
-                "Hub is returning 502 — check the logs and diagnose",
-                "Builder containers keep restarting — investigate why",
-                "Check disk space and memory on the Deploy server",
-                "The Deploy API returns 500 on new app provisioning — fix it",
+                "The Builder dashboard loads slowly — can you optimize it?",
+                "Check the Deploy API logs and fix the most recent error",
+                "The Hub mobile layout on the Clients tab is broken",
+                "Add better error messages to the Deploy API responses",
               ].map(s => (
                 <button
                   key={s}
@@ -541,7 +305,7 @@ function ChatUI() {
 
         {messages.map(msg => {
           const isUser = msg.role === "user";
-          const isStreaming = msg.streaming;
+          const isThinking = msg.content === "Thinking…";
           const change = msg.changeId ? changeMap[msg.changeId] : undefined;
 
           return (
@@ -551,51 +315,24 @@ function ChatUI() {
                   <div className="flex items-center gap-1.5 mb-1.5">
                     <span className="text-sm">🛡️</span>
                     <span className="text-xs text-slate-500 font-medium">Watchdog</span>
-                    {isStreaming && (
-                      <span className="flex items-center gap-1 text-xs text-teal-500">
-                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse" />
-                        thinking
-                      </span>
-                    )}
                   </div>
                 )}
-
-                {!isUser && msg.trail && msg.trail.length > 0 && (
-                  <TrailPanel events={msg.trail} />
-                )}
-
-                {(msg.content || isStreaming) && (
-                  <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed mt-2 ${
-                    isUser
-                      ? "bg-teal-800 text-white rounded-tr-sm"
-                      : "bg-[#21253a] text-slate-200 rounded-tl-sm"
-                  }`}>
-                    <p className="whitespace-pre-wrap">
-                      {msg.content}
-                      {isStreaming && !msg.content && (
-                        <span className="inline-flex gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: "0ms" }} />
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: "150ms" }} />
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: "300ms" }} />
-                        </span>
-                      )}
-                      {isStreaming && msg.content && <span className="animate-pulse">▍</span>}
-                    </p>
-                  </div>
-                )}
+                <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                  isUser
+                    ? "bg-teal-800 text-white rounded-tr-sm"
+                    : "bg-[#21253a] text-slate-200 rounded-tl-sm"
+                } ${isThinking ? "animate-pulse" : ""}`}>
+                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                </div>
 
                 {change && (
                   <DiffCard
                     changeId={change.changeId}
                     changes={change.changes}
-                    approvals={change.approvals}
                     status={change.status}
-                    prUrl={change.prUrl}
                     onApprove={() => approve(change.changeId)}
                     onDismiss={() => dismiss(change.changeId)}
-                    onRunAction={(approval) => runAction(approval, change.changeId)}
                     approving={approving === change.changeId}
-                    runningAction={runningAction}
                   />
                 )}
               </div>
@@ -636,9 +373,6 @@ function ChatUI() {
             )}
           </button>
         </div>
-        <p className="text-center text-[10px] text-slate-600 mt-2">
-          Agent will check Docker logs, SSH, and your codebase before proposing fixes · Changes require PR review
-        </p>
       </div>
     </div>
   );
