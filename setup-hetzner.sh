@@ -1,7 +1,7 @@
 #!/bin/bash
 # Kantage Watchdog — Hetzner server setup script
 # Run this ONCE on a fresh Hetzner CX21 (Ubuntu 22.04) server
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/kantage-watchdog/main/setup-hetzner.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/kantagesolutions/kantage-watchdog/main/setup-hetzner.sh | bash
 
 set -e
 
@@ -70,7 +70,7 @@ echo ""
 echo "✅ Server setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Copy your app files:   scp -r ./watchdog/* root@SERVER:/opt/watchdog/"
+echo "  1. Clone the repo:        git clone https://github.com/kantagesolutions/kantage-watchdog.git /opt/watchdog/"
 echo "  2. Create .env:           cp /opt/watchdog/.env.example /opt/watchdog/.env && nano /opt/watchdog/.env"
 echo "  3. Start the app:         cd /opt/watchdog && docker compose up -d --build"
 echo "  4. Run DB migrations:     docker compose exec watchdog npx prisma db push"
