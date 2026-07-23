@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getLatestStatus } from "@/lib/health-check";
-import { getCheckState } from "@/lib/check-state";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
@@ -14,7 +13,5 @@ export async function GET() {
     prisma.incident.findMany({ where: { status: "open" }, orderBy: { startedAt: "desc" } }),
   ]);
 
-  const checkState = getCheckState();
-
-  return NextResponse.json({ statuses, openIncidents, ...checkState });
+  return NextResponse.json({ statuses, openIncidents });
 }
