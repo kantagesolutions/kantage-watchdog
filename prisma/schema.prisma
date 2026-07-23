@@ -37,7 +37,6 @@ model Incident {
 model ChatSession {
   id          String        @id @default(cuid())
   title       String
-  userId      String?
   incidentId  String?
   incident    Incident?     @relation(fields: [incidentId], references: [id])
   createdAt   DateTime      @default(now())
@@ -57,18 +56,16 @@ model ChatMessage {
 }
 
 model CodeChange {
-  id         String      @id @default(cuid())
-  sessionId  String
-  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  repo       String
-  summary    String
-  files      Json
-  status     String      @default("pending")
-  commitSha  String?
-  branchName String?
-  prUrl      String?
-  error      String?
-  createdAt  DateTime    @default(now())
+  id        String      @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  repo      String
+  summary   String
+  files     Json
+  status    String      @default("pending")
+  commitSha String?
+  error     String?
+  createdAt DateTime    @default(now())
 }
 
 model Setting {
