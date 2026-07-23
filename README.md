@@ -21,7 +21,7 @@ Create a fresh Ubuntu 22.04 server. This should be **separate** from your existi
 
 ```bash
 ssh root@YOUR_WATCHDOG_SERVER_IP
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/kantage-watchdog/main/setup-hetzner.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/kantagesolutions/kantage-watchdog/main/setup-hetzner.sh)
 ```
 
 ### 3. Deploy the app
@@ -30,7 +30,7 @@ From your local machine (in the `watchdog/` directory):
 
 ```bash
 # Copy files to server
-scp -r ./* root@YOUR_WATCHDOG_SERVER_IP:/opt/watchdog/
+git clone https://github.com/kantagesolutions/kantage-watchdog.git /opt/watchdog
 
 # SSH in and configure
 ssh root@YOUR_WATCHDOG_SERVER_IP
